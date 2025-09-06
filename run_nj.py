@@ -1,5 +1,9 @@
-import csv, json, os, sys
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import os
+# Toggle: set USE_STUB_NJ=1 to use the stub; anything else uses full logic
+if os.getenv("USE_STUB_NJ", "0") == "1":
+    from engines.compute_nj import compute_nj                    # <-- your existing STUB
+else:
+    from engines.compute_nj_full import compute_nj               # <-- NEW full version
 
 try:
     from engines.compute_nj import compute_nj
