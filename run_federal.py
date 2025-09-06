@@ -1,6 +1,10 @@
-import csv, json, os, sys
-# make sure the repo root (where this file lives) is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import os
+# Toggle: set USE_STUB_FED=1 to use the stub; anything else uses full logic
+if os.getenv("USE_STUB_FED", "0") == "1":
+    from engines.compute_federal import compute_federal          # <-- your existing STUB
+else:
+    from engines.compute_federal_full import compute_federal     # <-- NEW full version
+
 
 try:
     from engines.compute_federal import compute_federal
