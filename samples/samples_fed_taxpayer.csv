@@ -1,0 +1,2 @@
+first_name,last_name,ssn,filing_status,spouse_name,spouse_ssn,spouse_deceased_year,exemptions,dependents,wages,federal_withheld,eitc_claim
+Alex,Example,123-45-6789,single,,,,"0","0","20000","1500",false
