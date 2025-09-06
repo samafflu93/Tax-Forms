@@ -1,4 +1,7 @@
 import os
+import sys
+import csv
+import json
 # Toggle: set USE_STUB_NJ=1 to use the stub; anything else uses full logic
 if os.getenv("USE_STUB_NJ", "0") == "1":
     from engines.compute_nj import compute_nj                    # <-- your existing STUB
