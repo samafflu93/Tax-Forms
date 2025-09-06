@@ -1,0 +1,2 @@
+filing_status,primary_first,primary_last,primary_ssn,primary_dob,address,city,state,zip,spouse_first,spouse_last,spouse_ssn,spouse_dob,spouse_deceased_year,phone,email,num_qualifying_children,investment_income,interest_taxable,dividends_ordinary,dividends_qualified,unemployment_comp,student_loan_interest_paid,bank_routing,bank_account,deposit_type
+Single,Alex,Rivera,123-45-6789,1992-04-10,12 Oak St,Edison,NJ,08817,,,,,,732-555-1212,alex@example.com,0,0,0,0,0,0,011000015,123456789,checking

@@ -1,0 +1,29 @@
+key,label,help,source_ref,required,type,show_if
+filing_status,Filing status,Single / MFJ / MFS / HOH / QW,,true,choice:Single|MFJ|MFS|HOH|QW,
+primary_first,First name,As on your W-2,,true,string,
+primary_last,Last name,As on your W-2,,true,string,
+primary_ssn,SSN (###-##-####),Digits only,,true,ssn,
+primary_dob,Date of birth (YYYY-MM-DD),Used for age-based credits,,true,date,
+address,Street address,,,,true,string,
+city,City,,,,true,string,
+state,State,Two-letter (e.g., NJ),,true,string,
+zip,ZIP code,,,,true,zip,
+spouse_first,Spouse first name,If MFJ/MFS/QW only,,,string,filing_status in [MFJ,MFS,QW]
+spouse_last,Spouse last name,If MFJ/MFS/QW only,,,string,filing_status in [MFJ,MFS,QW]
+spouse_ssn,Spouse SSN,If MFJ/MFS/QW only,,,ssn,filing_status in [MFJ,MFS,QW]
+spouse_dob,Spouse DOB (YYYY-MM-DD),If MFJ/MFS/QW only,,,date,filing_status in [MFJ,MFS,QW]
+spouse_deceased_year,Year spouse passed,If QW only,,,year:2015-2025,filing_status==QW
+phone,Phone number,Optional contact,,false,string,
+email,Email,For status updates (optional),,false,email,
+num_qualifying_children,Qualifying children for EITC/CTC count,0–3 for MVP; use dependents file for full rules,,false,int,
+investment_income,Investment income total (for EITC test),Enter dividends+interest if any,,false,currency,
+w2[].wages_box1,W-2 wages (Box 1),From W-2 Box 1,W-2 Box 1,true,currency,
+w2[].fed_withheld_box2,Federal tax withheld (Box 2),From W-2 Box 2,W-2 Box 2,true,currency,
+interest_taxable,Taxable interest (1099-INT),Enter 0 if none,Schedule B,false,currency,
+dividends_ordinary,Ordinary dividends (1099-DIV),Enter 0 if none,Schedule B,false,currency,
+dividends_qualified,Qualified dividends (subset of dividends),If known; else 0,Schedule B,false,currency,
+unemployment_comp,Unemployment compensation (1099-G),Enter 0 if none,Schedule 1,false,currency,
+student_loan_interest_paid,Student loan interest paid (cap applies),Enter 0 if none,Schedule 1,false,currency,
+bank_routing,Routing number (optional),For direct deposit,,false,routing,
+bank_account,Account number (optional),,,false,string,
+deposit_type,Checking or savings (optional),,,false,choice:checking|savings,

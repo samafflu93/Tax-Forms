@@ -1,0 +1,2 @@
+filing_status,primary_first,primary_last,primary_ssn,address,city,state,zip,spouse_first,spouse_last,spouse_ssn,spouse_deceased_year,exempt_dependent_count,exempt_taxpayer_over65,exempt_spouse_over65,exempt_taxpayer_blind_disabled,exempt_spouse_blind_disabled,exempt_taxpayer_veteran,exempt_spouse_veteran,interest_taxable,dividends_taxable,property_tax_paid,federal_eitc_amount,bank_routing,bank_account,deposit_type
+Single,Alex,Rivera,123-45-6789,12 Oak St,Edison,NJ,08817,,,,,0,false,false,false,false,false,false,0,0,0,0,,, 
