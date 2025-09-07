@@ -93,7 +93,7 @@ def compute_federal(taxpayer: Dict, w2s: List[Dict]) -> Dict[str, float]:
     gross_tax = _progressive_tax(taxable_income, brackets)
 
     # placeholder child credit
-    dependents = float(taxpayer.get("dependents", 0) or 0)
+    dependents = float(taxpayer.get("dependents", 0) or 0)  # <- robust to list/empty
     credits = dependents * CHILD_TAX_CREDIT_PER_CHILD
 
     net_tax = max(gross_tax - credits, 0.0)
@@ -111,3 +111,4 @@ def compute_federal(taxpayer: Dict, w2s: List[Dict]) -> Dict[str, float]:
         "34": refund,
         "37": amount_owed,
     }
+
