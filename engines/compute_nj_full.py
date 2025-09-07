@@ -45,7 +45,7 @@ def compute_nj(taxpayer: Dict, w2s: List[Dict]) -> Dict[str, float]:
     wages = sum(float(w.get("wages", 0) or 0) for w in w2s)
     withheld = sum(float(w.get("nj_withheld", 0) or 0) for w in w2s)
 
-    exemptions = float(taxpayer.get("exemptions", 0) or 0)
+    exemptions = float(taxpayer.get("exemptions", 0) or 0)  # <- robust to list/empty
     taxable = max(wages - exemptions * EXEMPTION_AMOUNT, 0.0)
 
     tax = _progressive_tax(taxable, NJ_BRACKETS)
