@@ -111,4 +111,3 @@ def compute_federal(taxpayer: Dict, w2s: List[Dict]) -> Dict[str, float]:
         "34": refund,
         "37": amount_owed,
     }
-
