@@ -1,528 +1,565 @@
-#!/usr/bin/env python3
-# US + NJ Tax Wizard (Phase 2+)
-# - Friendly prompts (with form box hints)
-# - Money parsing accepts $, commas, and (negative) parentheses
-# - Saves per-digit arrays for SSNs, ZIPs, DOBs, and *all* money fields
-# - Adds per-digit arrays for every numeric engine output line (for PDF mapping)
+# wizard.py — console wizard with Review/Edit and money digit arrays
+from __future__ import annotations
+import os, sys, json
+from typing import Dict, List
 
-import os, csv, json, re
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+# ---------- small input helpers ----------
 
-# ------------------------- engine imports -------------------------
-USE_STUB_FED = os.getenv("USE_STUB_FED", "0") == "1"
-USE_STUB_NJ  = os.getenv("USE_STUB_NJ", "0") == "1"
+def prompt(label: str, default: str = "") -> str:
+    ans = input(f"{label} [{default}]: ").strip()
+    return ans if ans else default
 
-if USE_STUB_FED:
-    from engines.compute_federal import compute_federal as FED
-else:
-    from engines.compute_federal_full import compute_federal as FED
+def prompt_yesno(label: str, default_no: bool = False) -> bool:
+    default_letter = "n" if default_no else "y"
+    ans = input(f"{label} (y/n) [{default_letter}]: ").strip().lower()
+    if not ans:
+        return default_letter == "y"
+    return ans.startswith("y")
 
-if USE_STUB_NJ:
-    from engines.compute_nj import compute_nj as NJ
-else:
-    from engines.compute_nj_full import compute_nj as NJ
+def _to_float_money(raw: str) -> float:
+    # supports $ , and parentheses for negatives
+    s = (raw or "").strip().replace(",", "").replace("$", "")
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    return float(s) if s else 0.0
 
-# ------------------------- output paths ---------------------------
-OUT_DIR = Path("out")
-(OUT_DIR / "user_inputs").mkdir(parents=True, exist_ok=True)
-SESS_DIR = Path("sessions")
-SESS_DIR.mkdir(parents=True, exist_ok=True)
-
-# ------------------------- helpers -------------------------------
-_DIGITS_RE = re.compile(r"\d")
-
-def fnum(raw: Any, default: float = 0.0) -> float:
-    """Flexible money parser: strips $, commas; supports (1,234.56) as negative."""
+def prompt_money(label: str, default: float = 0.0) -> float:
+    ans = input(f"{label} [{default}]: ").strip()
+    if ans == "":
+        return float(default)
     try:
-        if raw is None:
-            return default
-        if isinstance(raw, (int, float)):
-            return float(raw)
-        s = str(raw).strip()
-        if s == "":
-            return default
-        neg = s.startswith("(") and s.endswith(")")
-        s = s.replace("$", "").replace(",", "").replace("(", "").replace(")", "")
-        v = float(s) if s else 0.0
-        return -v if neg else v
-    except Exception:
+        return _to_float_money(ans)
+    except ValueError:
+        print("  Please enter a number (e.g., 1,234.56 or ($123.45)).")
+        return prompt_money(label, default)
+
+def prompt_int(label: str, default: int = 0) -> int:
+    ans = input(f"{label} [{default}]: ").strip().replace(",", "")
+    if ans == "":
         return default
-
-def digits_from_string(raw: Any) -> List[str]:
-    """Return only digits, split into single-character strings."""
-    if raw is None:
-        return []
-    return _DIGITS_RE.findall(str(raw))
-
-def digits_from_money(amount: Any) -> List[str]:
-    """Convert numeric amount to whole-dollar digit array (for boxed fields)."""
     try:
-        n = int(round(float(amount)))
-        return list(str(n))
-    except Exception:
-        return []
+        return int(float(ans))
+    except ValueError:
+        print("  Please enter a whole number.")
+        return prompt_int(label, default)
 
-def parse_dob(raw: str) -> Tuple[str, List[str]]:
-    """
-    Accepts 'YYYY-MM-DD', 'MM/DD/YYYY', 'MM-DD-YYYY', 'YYYY/MM/DD'.
-    Returns ('YYYY-MM-DD', ['Y','Y','Y','Y','M','M','D','D']) or ("", []) if invalid.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return "", []
-    s2 = s.replace(".", "/").replace("-", "/")
-    parts = s2.split("/")
-    try:
-        if len(parts) == 3:
-            # Try MM/DD/YYYY if last is 4-digit year
-            if len(parts[2]) == 4:
-                m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
-            else:
-                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-            dt = datetime(year=y, month=m, day=d)
-        else:
-            dt = datetime.strptime(s, "%Y-%m-%d")
-        iso = dt.strftime("%Y-%m-%d")
-        return iso, list(dt.strftime("%Y%m%d"))
-    except Exception:
-        return "", []
+def prompt_choice(label: str, options: List[str], default: str) -> str:
+    opts = ", ".join(options)
+    while True:
+        ans = input(f"{label} [{default}]\n  Please choose one of: {opts}\n> ").strip().lower()
+        if not ans:
+            return default
+        if ans in options:
+            return ans
+        print("  Invalid choice, try again.")
 
-def money_to_dollars_cents(amount: Any) -> Tuple[List[str], List[str]]:
-    """1234.56 -> (['1','2','3','4'], ['5','6']) with rounding; negatives handled by abs()."""
+def digits_list(raw: str) -> List[str]:
+    return [c for c in str(raw) if c.isdigit()]
+
+# ---------- money → digit arrays ----------
+
+def money_to_digits(amount: float, dollar_pad: int = 9) -> (List[str], List[str]):
+    """
+    Convert 1234.56 -> (['0','0','0','0','1','2','3','4'], ['5','6']) with pad=8
+    - dollars are zero-padded on the left to dollar_pad
+    - cents always 2 digits
+    """
     try:
         val = float(amount)
     except Exception:
-        return [], []
-    val = abs(val)
-    s = f"{val:.2f}"
-    d, c = s.split(".")
-    return list(d), list(c)
+        val = 0.0
+    val_abs = abs(val)
+    dollars = int(val_abs)  # floor toward zero
+    cents = int(round((val_abs - dollars) * 100))  # rounded cents
+    if cents == 100:  # handle 1.9999 -> 2.00 rounding edge
+        dollars += 1
+        cents = 0
+    d_str = f"{dollars:0{dollar_pad}d}"
+    c_str = f"{cents:02d}"
+    return list(d_str), list(c_str)
 
-def add_digit_arrays_to_lines(lines: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    For each numeric value in engine output, add:
-      <key>_digits       (dollars array)
-      <key>_cents_digits (cents array)
-    """
-    out = dict(lines)
-    for k, v in list(lines.items()):
-        try:
-            float(v)
-            is_num = True
-        except Exception:
-            is_num = False
-        if is_num:
-            d, c = money_to_dollars_cents(v)
-            out[f"{k}_digits"] = d
-            out[f"{k}_cents_digits"] = c
-    return out
+def set_money(obj: Dict, key: str, value: float, pad: int = 9):
+    """Store numeric and digits arrays side-by-side on obj."""
+    obj[key] = float(value or 0.0)
+    d, c = money_to_digits(obj[key], pad)
+    obj[f"{key}_digits"] = d
+    obj[f"{key}_cents_digits"] = c
 
-def yn(prompt: str, default: bool = False) -> bool:
-    d = "y" if default else "n"
-    ans = input(f"{prompt} (y/n) [{d}]: ").strip().lower()
-    if ans == "":
-        return default
-    return ans.startswith("y")
+# ---------- collect sections ----------
 
-def ask(prompt: str, default: str = "") -> str:
-    s = input(f"{prompt} [{default}]: ").strip()
-    return s if s != "" else default
+def collect_personal_info() -> Dict:
+    print("\n=== Basic Personal Info ===")
+    tp: Dict = {}
+    tp["first"] = prompt("First name")
+    tp["last"]  = prompt("Last name")
+    ssn_raw     = prompt("SSN (123-45-6789)")
+    tp["ssn"]   = ssn_raw
+    tp["ssn_digits"] = digits_list(ssn_raw)
 
-def ask_money(prompt: str, default: float = 0.0) -> float:
-    raw = input(f"{prompt} [{default}]: ").strip()
-    return fnum(raw, default) if raw != "" else default
+    dob_raw     = prompt("Date of Birth (MM/DD/YYYY)")
+    tp["dob"]   = dob_raw
+    tp["dob_digits"] = digits_list(dob_raw)
 
-def choose_from(title: str, options: List[Tuple[str, str]], default_key: str) -> str:
-    print("\n" + title)
-    for i, (k, label) in enumerate(options, start=1):
-        dmark = " (default)" if k == default_key else ""
-        print(f"  {i}) {label}{dmark}")
-    valid = {k.lower(): k for k, _ in options}
-    while True:
-        raw = input(f"Choose 1–{len(options)} or keyword [{default_key}]: ").strip()
-        if raw == "":
-            return default_key
-        if raw.isdigit():
-            i = int(raw)
-            if 1 <= i <= len(options):
-                return options[i-1][0]
-        low = raw.lower()
-        if low in valid:
-            return valid[low]
-        print("  Please enter a valid number/keyword.")
+    tp["email"] = prompt("Email (optional)")
+    tp["filing_status"] = prompt_choice(
+        "Filing status",
+        ["single", "married_joint", "married_separate", "head_household", "qual_widow"],
+        "single",
+    )
 
-# ------------------------- interview sections ---------------------
-FILING_OPTS = [
-    ("single", "Single"),
-    ("married_joint", "Married filing jointly"),
-    ("married_separate", "Married filing separately"),
-    ("head_household", "Head of household"),
-    ("qual_widow", "Qualifying widow(er)"),
-]
+    print("\n=== Address & Residency ===")
+    addr: Dict = {}
+    addr["line1"] = prompt("Address line 1")
+    addr["line2"] = prompt("Address line 2 (optional)")
+    addr["city"]  = prompt("City")
+    addr["state"] = prompt("State (2 letters)", "NJ")
+    zip_raw       = prompt("ZIP code (5 digits)")
+    addr["zip"]   = zip_raw
+    addr["zip_digits"] = digits_list(zip_raw)
+    tp["address"] = addr
 
-def gather_personal() -> Dict[str, Any]:
-    print("\n=== Personal Info ===")
-    first = ask("First name")
-    last  = ask("Last name")
-    filing_status = choose_from("Filing status:", FILING_OPTS, "single")
+    tp["nj_full_year_resident"] = prompt_yesno("Are you a full-year NJ resident?")
+    tp["nj_county"] = prompt("NJ County (optional)")
+    return tp
 
-    ssn_raw = ask("SSN (###-##-####)")
-    ssn_digits = digits_from_string(ssn_raw)
-
-    dob_raw = ask("Date of birth (MM/DD/YYYY or YYYY-MM-DD)")
-    dob_iso, dob_digits = parse_dob(dob_raw)
-
-    zip_raw = ask("ZIP code")
-    zip_digits = digits_from_string(zip_raw)
-
-    email = ask("Email (optional)", "")
-    addr  = ask("Street address", "")
-    city  = ask("City", "")
-    state = ask("State", "NJ")
-    county = ask("NJ County (optional)", "")
-
-    nj_full_year = yn("Are you a full-year New Jersey resident?", True)
-
-    return {
-        "first_name": first,
-        "last_name": last,
-        "filing_status": filing_status,
-        "ssn": ssn_raw,
-        "ssn_digits": ssn_digits,
-        "dob": dob_iso,
-        "dob_digits": dob_digits,
-        "zip": zip_raw,
-        "zip_digits": zip_digits,
-        "email": email,
-        "address": addr,
-        "city": city,
-        "state": state,
-        "county": county,
-        "nj_full_year_resident": "y" if nj_full_year else "n",
-    }
-
-def gather_dependents() -> List[Dict[str, Any]]:
+def collect_dependents() -> List[Dict]:
+    deps: List[Dict] = []
     print("\n=== Dependents (optional) ===")
-    deps: List[Dict[str, Any]] = []
-    if yn("Do you have dependents to claim?", False):
-        while True:
-            name = ask("  Dependent full name", "")
-            if name == "":
-                break
-            dssn = ask("  Dependent SSN (###-##-####)", "")
-            dssn_digits = digits_from_string(dssn)
-            ddob_raw = ask("  Dependent DOB (MM/DD/YYYY or YYYY-MM-DD)", "")
-            ddob_iso, ddob_digits = parse_dob(ddob_raw)
-            relation = ask("  Relationship (child/parent/other)", "child")
-            deps.append({
-                "name": name,
-                "ssn": dssn,
-                "ssn_digits": dssn_digits,
-                "dob": ddob_iso,
-                "dob_digits": ddob_digits,
-                "relationship": relation
-            })
-            if not yn("  Add another dependent?", False):
-                break
+    if not prompt_yesno("Do you have any dependents?"):
+        return deps
+
+    while True:
+        first = prompt("  Dependent first name")
+        last  = prompt("  Dependent last name")
+        ssn   = prompt("  Dependent SSN (123-45-6789)")
+        dob   = prompt("  Dependent DOB (MM/DD/YYYY)")
+        rel   = prompt("  Relationship to you")
+        deps.append({
+            "first": first,
+            "last":  last,
+            "ssn":   ssn,
+            "digits": digits_list(ssn),
+            "dob":   dob,
+            "dob_digits": digits_list(dob),
+            "relationship": rel,
+        })
+        if not prompt_yesno("Add another dependent?"):
+            break
     return deps
 
-def gather_w2s() -> List[Dict[str, Any]]:
+def collect_w2s() -> List[Dict]:
+    w2s: List[Dict] = []
     print("\n=== W-2 Income ===")
-    w2s: List[Dict[str, Any]] = []
-    if not yn("Do you have any W-2s?", True):
+    if not prompt_yesno("Do you have any W-2s?"):
         return w2s
     while True:
-        employer = ask("  Employer name")
-        wages = ask_money("  Wages (Box 1)", 0.0)
-        fed_wh = ask_money("  Federal income tax withheld (Box 2)", 0.0)
-        ss_w = ask_money("  Social Security wages (Box 3) [optional]", 0.0)
-        ss_t = ask_money("  Social Security tax withheld (Box 4) [optional]", 0.0)
-        med_w = ask_money("  Medicare wages (Box 5) [optional]", 0.0)
-        med_t = ask_money("  Medicare tax withheld (Box 6) [optional]", 0.0)
-        nj_w = ask_money("  NJ wages (Box 16)", 0.0)
-        nj_wh = ask_money("  NJ income tax withheld (Box 17)", 0.0)
+        print("\nEnter W-2 details from the form (box labels shown):")
+        w: Dict = {}
+        w["employer"] = prompt("Employer name")
 
-        w2 = {
-            "employer": employer,
+        set_money(w, "wages",            prompt_money("  Box 1 – Wages"))
+        set_money(w, "federal_withheld", prompt_money("  Box 2 – Federal income tax withheld"))
+        set_money(w, "ss_wages",         prompt_money("  Box 3 – Social Security wages", 0.0))
+        set_money(w, "ss_tax",           prompt_money("  Box 4 – Social Security tax withheld", 0.0))
+        set_money(w, "medicare_wages",   prompt_money("  Box 5 – Medicare wages", 0.0))
+        set_money(w, "medicare_tax",     prompt_money("  Box 6 – Medicare tax", 0.0))
+        set_money(w, "nj_wages",         prompt_money("  Box 16 – NJ wages"))
+        set_money(w, "nj_withheld",      prompt_money("  Box 17 – NJ income tax withheld"))
 
-            "wages_box1": wages,
-            "wages_box1_digits": digits_from_money(wages),
-
-            "fed_withheld_box2": fed_wh,
-            "fed_withheld_box2_digits": digits_from_money(fed_wh),
-
-            "ss_wages_box3": ss_w,
-            "ss_wages_box3_digits": digits_from_money(ss_w),
-
-            "ss_tax_box4": ss_t,
-            "ss_tax_box4_digits": digits_from_money(ss_t),
-
-            "medicare_wages_box5": med_w,
-            "medicare_wages_box5_digits": digits_from_money(med_w),
-
-            "medicare_tax_box6": med_t,
-            "medicare_tax_box6_digits": digits_from_money(med_t),
-
-            "nj_wages_box16": nj_w,
-            "nj_wages_box16_digits": digits_from_money(nj_w),
-
-            "nj_withheld_box17": nj_wh,
-            "nj_withheld_box17_digits": digits_from_money(nj_wh),
-        }
-        w2s.append(w2)
-
-        if not yn("  Add another W-2?", False):
+        w2s.append(w)
+        if not prompt_yesno("Add another W-2?"):
             break
     return w2s
 
-def gather_other_income() -> Dict[str, Any]:
+def collect_other_income(tp: Dict):
     print("\n=== Other Income (optional) ===")
-    out: Dict[str, Any] = {}
-
-    if yn("Any bank interest (Form 1099-INT)?", False):
-        amt = ask_money("  1099-INT interest (Box 1)", 0.0)
-        out["bank_interest"] = amt
-        out["bank_interest_digits"] = digits_from_money(amt)
+    if prompt_yesno("Any bank interest (1099-INT)?"):
+        set_money(tp, "interest", prompt_money("  1099-INT Box 1 – Interest"))
     else:
-        out["bank_interest"] = 0.0
-        out["bank_interest_digits"] = []
+        set_money(tp, "interest", 0.0)
 
-    if yn("Any dividends (Form 1099-DIV)?", False):
-        ord_amt = ask_money("  1099-DIV ordinary dividends (Box 1a)", 0.0)
-        qual_amt = ask_money("  1099-DIV qualified dividends (Box 1b) [optional]", 0.0)
-        capg_amt = ask_money("  1099-DIV capital gain distributions (Box 2a) [optional]", 0.0)
-        out["dividends_ordinary"] = ord_amt
-        out["dividends_ordinary_digits"] = digits_from_money(ord_amt)
-        out["dividends_qualified"] = qual_amt
-        out["dividends_qualified_digits"] = digits_from_money(qual_amt)
-        out["capital_gains_dist"] = capg_amt
-        out["capital_gains_dist_digits"] = digits_from_money(capg_amt)
+    if prompt_yesno("Any dividends (1099-DIV)?"):
+        set_money(tp, "dividends", prompt_money("  1099-DIV Box 1a – Ordinary dividends"))
     else:
-        out["dividends_ordinary"] = 0.0
-        out["dividends_ordinary_digits"] = []
-        out["dividends_qualified"] = 0.0
-        out["dividends_qualified_digits"] = []
-        out["capital_gains_dist"] = 0.0
-        out["capital_gains_dist_digits"] = []
+        set_money(tp, "dividends", 0.0)
 
-    if yn("Any unemployment income (Form 1099-G)?", False):
-        u = ask_money("  1099-G unemployment compensation (Box 1)", 0.0)
-        out["unemployment"] = u
-        out["unemployment_digits"] = digits_from_money(u)
+    if prompt_yesno("Any unemployment income (1099-G)?"):
+        set_money(tp, "unemployment", prompt_money("  1099-G Box 1 – Unemployment"))
     else:
-        out["unemployment"] = 0.0
-        out["unemployment_digits"] = []
+        set_money(tp, "unemployment", 0.0)
 
-    if yn("Any 1099-NEC self-employment income?", False):
-        nec_gross = ask_money("  1099-NEC gross income (Box 1)", 0.0)
-        nec_exp   = ask_money("  1099-NEC expenses (if any)", 0.0)
-        nec_net   = max(nec_gross - nec_exp, 0.0)
-        out["nec_gross"] = nec_gross
-        out["nec_gross_digits"] = digits_from_money(nec_gross)
-        out["nec_expenses"] = nec_exp
-        out["nec_expenses_digits"] = digits_from_money(nec_exp)
-        out["nec_net"] = nec_net
-        out["nec_net_digits"] = digits_from_money(nec_net)
+    if prompt_yesno("Any 1099-NEC self-employment income?"):
+        set_money(tp, "nec_income",   prompt_money("  1099-NEC Box 1 – Gross income"))
+        set_money(tp, "nec_expenses", prompt_money("  1099-NEC Expenses", 0.0))
     else:
-        out["nec_gross"] = 0.0; out["nec_gross_digits"] = []
-        out["nec_expenses"] = 0.0; out["nec_expenses_digits"] = []
-        out["nec_net"] = 0.0; out["nec_net_digits"] = []
+        set_money(tp, "nec_income",   0.0)
+        set_money(tp, "nec_expenses", 0.0)
 
-    if yn("Any Social Security benefits (SSA-1099)?", False):
-        ss = ask_money("  SSA-1099 total benefits (Box 5)", 0.0)
-        out["ss_benefits_total"] = ss
-        out["ss_benefits_total_digits"] = digits_from_money(ss)
+    if prompt_yesno("Any Social Security benefits (SSA-1099)?"):
+        set_money(tp, "ssa_benefits", prompt_money("  SSA-1099 Box 5 – Net benefits"))
     else:
-        out["ss_benefits_total"] = 0.0
-        out["ss_benefits_total_digits"] = []
+        set_money(tp, "ssa_benefits", 0.0)
 
-    if yn("Any pension/IRA distributions (Form 1099-R)?", False):
-        gross = ask_money("  1099-R gross distribution (Box 1)", 0.0)
-        taxable = ask_money("  1099-R taxable amount (Box 2a) [enter same as Box 1 if unknown]", gross)
-        out["pension_gross"] = gross
-        out["pension_gross_digits"] = digits_from_money(gross)
-        out["pension_taxable"] = taxable
-        out["pension_taxable_digits"] = digits_from_money(taxable)
+    if prompt_yesno("Any pension/IRA distributions (1099-R)?"):
+        set_money(tp, "pension", prompt_money("  1099-R Box 1 – Gross distribution"))
     else:
-        out["pension_gross"] = 0.0; out["pension_gross_digits"] = []
-        out["pension_taxable"] = 0.0; out["pension_taxable_digits"] = []
+        set_money(tp, "pension", 0.0)
 
-    return out
-
-def gather_adjustments() -> Dict[str, Any]:
+def collect_adjustments(tp: Dict):
     print("\n=== Adjustments & Deductions (basic) ===")
-    itemize = yn("Do you want to itemize deductions (Schedule A)? If unsure, select No (standard).", False)
-    stud_loan = ask_money("Student loan interest (Form 1098-E)", 0.0)
-    ira_contrib = ask_money("Traditional IRA contributions", 0.0)
-    hsa_contrib = ask_money("HSA contributions", 0.0)
+    tp["itemize"] = prompt_yesno(
+        "Do you want to itemize deductions (Schedule A)? If unsure, choose No (standard).",
+        default_no=True
+    )
+    set_money(tp, "student_loan_interest", prompt_money("Student loan interest", 0.0))
+    set_money(tp, "ira_contributions",     prompt_money("Traditional IRA contributions", 0.0))
+    set_money(tp, "hsa_contributions",     prompt_money("HSA contributions", 0.0))
 
-    return {
-        "itemize": "y" if itemize else "n",
-        "student_loan_interest": stud_loan,
-        "student_loan_interest_digits": digits_from_money(stud_loan),
-        "ira_contrib": ira_contrib,
-        "ira_contrib_digits": digits_from_money(ira_contrib),
-        "hsa_contrib": hsa_contrib,
-        "hsa_contrib_digits": digits_from_money(hsa_contrib),
-    }
-
-def gather_nj_housing() -> Dict[str, Any]:
+def collect_nj_property(tp: Dict):
     print("\n=== NJ Property Tax / Rent (optional) ===")
-    out = {
-        "housing_status": "",
-        "property_tax_paid": 0.0,
-        "property_tax_paid_digits": [],
-        "rent_paid": 0.0,
-        "rent_paid_digits": [],
-        "housing_months": 0,
-        "landlord": "",
-    }
-    if yn("Did you pay NJ property tax or rent in the year?", False):
-        status = choose_from(
-            "Are you a homeowner, tenant, or both?",
-            [("homeowner","Homeowner"),("tenant","Tenant"),("both","Both")],
-            "tenant"
-        )
-        out["housing_status"] = status
-        if status in ("homeowner","both"):
-            pt = ask_money("  NJ property tax paid (total)", 0.0)
-            out["property_tax_paid"] = pt
-            out["property_tax_paid_digits"] = digits_from_money(pt)
-        if status in ("tenant","both"):
-            r = ask_money("  NJ rent paid (total)", 0.0)
-            out["rent_paid"] = r
-            out["rent_paid_digits"] = digits_from_money(r)
-        out["housing_months"] = int(fnum(ask("  # months lived at this property (0–12)", "12")))
-        out["landlord"] = ask("  Landlord/Property owner name [optional]", "")
-    return out
-
-def gather_refund_info() -> Dict[str, Any]:
-    print("\n=== Refund / Payment Preferences ===")
-    direct = yn("If you’re due a refund, do you want direct deposit?", True)
-    if direct:
-        routing = ask("Routing number")
-        account = ask("Account number")
-        acct_type = choose_from("Account type:", [("checking","Checking"),("savings","Savings")], "checking")
-        return {
-            "want_direct_deposit": "y",
-            "bank_routing": routing,
-            "bank_routing_digits": digits_from_string(routing),
-            "bank_account": account,
-            "bank_account_digits": digits_from_string(account),
-            "bank_account_type": acct_type,
-        }
-    else:
-        return {
-            "want_direct_deposit": "n",
-            "bank_routing": "",
-            "bank_routing_digits": [],
-            "bank_account": "",
-            "bank_account_digits": [],
-            "bank_account_type": "",
-        }
-
-# ------------------------- csv writers (optional) ------------------
-def save_taxpayer_csv(taxpayer: Dict[str, Any], dependents: List[Dict[str, Any]]):
-    path = OUT_DIR / "user_inputs" / "taxpayer.csv"
-    row = dict(taxpayer)
-    row["dependents_count"] = len(dependents)
-    # remove big arrays to keep CSV compact
-    for k in list(row.keys()):
-        if k.endswith("_digits"):
-            row.pop(k, None)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(row.keys()))
-        w.writeheader()
-        w.writerow(row)
-
-def save_w2s_csv(w2s: List[Dict[str, Any]]):
-    path = OUT_DIR / "user_inputs" / "w2s.csv"
-    if not w2s:
-        with path.open("w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["employer","wages_box1","fed_withheld_box2","nj_wages_box16","nj_withheld_box17"])
-            w.writeheader()
+    if not prompt_yesno("Did you pay NJ property tax or rent in the tax year?"):
+        set_money(tp, "rent_paid", 0.0)
+        set_money(tp, "property_tax_paid", 0.0)
+        tp["months_at_property"] = 0
+        tp["landlord_or_owner"]  = ""
         return
-    # strip digits arrays for csv
-    clean_rows = []
-    for r in w2s:
-        rr = {k: v for k, v in r.items() if not k.endswith("_digits")}
-        clean_rows.append(rr)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(clean_rows[0].keys()))
-        w.writeheader()
-        for rr in clean_rows:
-            w.writerow(rr)
+    status = prompt_choice("Are you a homeowner, tenant, or both? (homeowner/tenant/both)",
+                           ["homeowner","tenant","both"], "tenant")
+    if status in ("tenant","both"):
+        set_money(tp, "rent_paid", prompt_money("  NJ rent amount paid", 0.0))
+    else:
+        set_money(tp, "rent_paid", 0.0)
+    if status in ("homeowner","both"):
+        set_money(tp, "property_tax_paid", prompt_money("  NJ property tax paid", 0.0))
+    else:
+        set_money(tp, "property_tax_paid", 0.0)
+    tp["months_at_property"] = prompt_int("  # of months lived at this property (0–12)", 12)
+    tp["landlord_or_owner"]  = prompt("  Landlord/Property owner name", "")
 
-# ------------------------- main -----------------------------------
+def collect_refund_prefs(tp: Dict):
+    print("\n=== Refund / Payment Preferences ===")
+    if prompt_yesno("If you are due a refund, do you want direct deposit?"):
+        tp["direct_deposit"] = True
+        routing = prompt("Routing number (9 digits)")
+        account = prompt("Account number")
+        tp["bank_routing"] = routing
+        tp["bank_routing_digits"] = digits_list(routing)
+        tp["bank_account"] = account
+        tp["bank_account_digits"] = digits_list(account)
+        tp["bank_account_type"] = prompt_choice("Account type", ["checking","savings"], "checking")
+    else:
+        tp["direct_deposit"] = False
+        tp["bank_routing"] = ""
+        tp["bank_account"] = ""
+        tp["bank_account_type"] = "checking"
+        tp["bank_routing_digits"] = []
+        tp["bank_account_digits"] = []
+
+# ---------- Review & Edit helpers ----------
+
+def show_summary(tp: Dict, w2s: List[Dict]):
+    print("\n=========== REVIEW SUMMARY ===========")
+    print(f"Name: {tp.get('first','')} {tp.get('last','')}")
+    print(f"SSN:  {tp.get('ssn','')}")
+    print(f"DOB:  {tp.get('dob','')}")
+    print(f"Email: {tp.get('email','')}")
+    print(f"Filing status: {tp.get('filing_status','')}")
+    addr = tp.get("address", {})
+    print("Address:")
+    print(f"  {addr.get('line1','')}")
+    if addr.get("line2"): print(f"  {addr.get('line2')}")
+    print(f"  {addr.get('city','')}, {addr.get('state','')} {addr.get('zip','')}")
+    print(f"NJ full-year resident: {tp.get('nj_full_year_resident', False)}")
+    if tp.get("nj_county"): print(f"NJ County: {tp.get('nj_county')}")
+
+    print("\nDependents:")
+    deps = tp.get("dependents", [])
+    if not deps:
+        print("  (none)")
+    else:
+        for i, d in enumerate(deps, 1):
+            print(f"  {i}. {d.get('first','')} {d.get('last','')} — {d.get('relationship','')} (SSN {d.get('ssn','')})")
+
+    print("\nW-2s:")
+    if not w2s:
+        print("  (none)")
+    else:
+        for i, w in enumerate(w2s, 1):
+            print(f"  {i}. {w.get('employer','')}: "
+                  f"Wages {w.get('wages',0):,.2f}, Fed WH {w.get('federal_withheld',0):,.2f}, "
+                  f"NJ Wages {w.get('nj_wages',0):,.2f}, NJ WH {w.get('nj_withheld',0):,.2f}")
+
+    print("\nOther Income:")
+    print(f"  Interest(1099-INT): {tp.get('interest',0):,.2f}")
+    print(f"  Dividends(1099-DIV): {tp.get('dividends',0):,.2f}")
+    print(f"  Unemployment(1099-G): {tp.get('unemployment',0):,.2f}")
+    print(f"  NEC gross(1099-NEC): {tp.get('nec_income',0):,.2f}  Expenses: {tp.get('nec_expenses',0):,.2f}")
+    print(f"  Social Security(SSA-1099): {tp.get('ssa_benefits',0):,.2f}")
+    print(f"  Pension/IRA(1099-R): {tp.get('pension',0):,.2f}")
+
+    print("\nAdjustments & NJ:")
+    print(f"  Student loan interest: {tp.get('student_loan_interest',0):,.2f}")
+    print(f"  IRA contributions: {tp.get('ira_contributions',0):,.2f}")
+    print(f"  HSA contributions: {tp.get('hsa_contributions',0):,.2f}")
+    print(f"  Rent paid (NJ): {tp.get('rent_paid',0):,.2f}")
+    print(f"  Property tax paid (NJ): {tp.get('property_tax_paid',0):,.2f}")
+    print(f"  Months at property: {tp.get('months_at_property',0)}")
+    if tp.get("landlord_or_owner"): print(f"  Landlord/Owner: {tp.get('landlord_or_owner')}")
+
+    print("\nRefund/Deposit:")
+    if tp.get("direct_deposit", False):
+        print(f"  Direct deposit: YES ({tp.get('bank_account_type','checking')})")
+        print(f"  Routing: {tp.get('bank_routing','')}  Account: {tp.get('bank_account','')}")
+    else:
+        print("  Direct deposit: NO")
+    print("======================================\n")
+
+def edit_personal(tp: Dict):
+    print("\n-- Edit: Personal & Address --")
+    tp["first"] = prompt("First name", tp.get("first",""))
+    tp["last"]  = prompt("Last name",  tp.get("last",""))
+
+    ssn_raw = prompt("SSN (123-45-6789)", tp.get("ssn",""))
+    tp["ssn"] = ssn_raw
+    tp["ssn_digits"] = digits_list(ssn_raw)
+
+    dob_raw = prompt("Date of Birth (MM/DD/YYYY)", tp.get("dob",""))
+    tp["dob"] = dob_raw
+    tp["dob_digits"] = digits_list(dob_raw)
+
+    tp["email"] = prompt("Email (optional)", tp.get("email",""))
+    tp["filing_status"] = prompt_choice(
+        "Filing status",
+        ["single","married_joint","married_separate","head_household","qual_widow"],
+        tp.get("filing_status","single"),
+    )
+    addr = tp.get("address", {})
+    addr["line1"] = prompt("Address line 1", addr.get("line1",""))
+    addr["line2"] = prompt("Address line 2 (optional)", addr.get("line2",""))
+    addr["city"]  = prompt("City", addr.get("city",""))
+    addr["state"] = prompt("State (2 letters)", addr.get("state","NJ"))
+    zip_raw      = prompt("ZIP code (5 digits)", addr.get("zip",""))
+    addr["zip"]  = zip_raw
+    addr["zip_digits"] = digits_list(zip_raw)
+    tp["address"] = addr
+
+    tp["nj_full_year_resident"] = prompt_yesno("Full-year NJ resident?", default_no=not tp.get("nj_full_year_resident", True))
+    tp["nj_county"] = prompt("NJ County (optional)", tp.get("nj_county",""))
+
+def edit_one_w2(w: Dict):
+    print("\nEditing this W-2:")
+    w["employer"] = prompt("  Employer", w.get("employer",""))
+    set_money(w, "wages",            prompt_money("  Box 1 – Wages", w.get("wages",0)))
+    set_money(w, "federal_withheld", prompt_money("  Box 2 – Fed income tax withheld", w.get("federal_withheld",0)))
+    set_money(w, "ss_wages",         prompt_money("  Box 3 – SS wages", w.get("ss_wages",0)))
+    set_money(w, "ss_tax",           prompt_money("  Box 4 – SS tax withheld", w.get("ss_tax",0)))
+    set_money(w, "medicare_wages",   prompt_money("  Box 5 – Medicare wages", w.get("medicare_wages",0)))
+    set_money(w, "medicare_tax",     prompt_money("  Box 6 – Medicare tax", w.get("medicare_tax",0)))
+    set_money(w, "nj_wages",         prompt_money("  Box 16 – NJ wages", w.get("nj_wages",0)))
+    set_money(w, "nj_withheld",      prompt_money("  Box 17 – NJ tax withheld", w.get("nj_withheld",0)))
+
+def edit_w2s(w2s: List[Dict]):
+    while True:
+        print("\n-- Edit: W-2s --")
+        if not w2s:
+            print("No W-2s yet.")
+        else:
+            for i, w in enumerate(w2s, 1):
+                print(f"  {i}. {w.get('employer','')} — Wages {w.get('wages',0):,.2f}, Fed WH {w.get('federal_withheld',0):,.2f}")
+        choice = prompt_choice("Choose: add, edit, delete, done", ["add","edit","delete","done"], "done")
+        if choice == "done":
+            return
+        if choice == "add":
+            w2s.extend(collect_w2s())
+        elif choice == "edit":
+            if not w2s:
+                print("No W-2 to edit."); continue
+            idx = max(1, min(len(w2s), prompt_int("Which W-2 # to edit?", 1)))
+            edit_one_w2(w2s[idx-1])
+        elif choice == "delete":
+            if not w2s:
+                print("No W-2 to delete."); continue
+            idx = max(1, min(len(w2s), prompt_int("Which W-2 # to delete?", 1)))
+            del w2s[idx-1]
+
+def edit_other_income(tp: Dict):
+    print("\n-- Edit: Other Income --")
+    set_money(tp, "interest",      prompt_money("  1099-INT Box 1 – Interest", tp.get("interest",0)))
+    set_money(tp, "dividends",     prompt_money("  1099-DIV Box 1a – Ordinary dividends", tp.get("dividends",0)))
+    set_money(tp, "unemployment",  prompt_money("  1099-G Box 1 – Unemployment", tp.get("unemployment",0)))
+    set_money(tp, "nec_income",    prompt_money("  1099-NEC Box 1 – Gross", tp.get("nec_income",0)))
+    set_money(tp, "nec_expenses",  prompt_money("  1099-NEC Expenses", tp.get("nec_expenses",0)))
+    set_money(tp, "ssa_benefits",  prompt_money("  SSA-1099 Box 5 – Net benefits", tp.get("ssa_benefits",0)))
+    set_money(tp, "pension",       prompt_money("  1099-R Box 1 – Gross distribution", tp.get("pension",0)))
+
+def edit_adjustments(tp: Dict):
+    print("\n-- Edit: Adjustments & Deductions --")
+    tp["itemize"] = prompt_yesno("Itemize deductions (Schedule A)?", default_no=not tp.get("itemize", False))
+    set_money(tp, "student_loan_interest", prompt_money("  Student loan interest", tp.get("student_loan_interest",0)))
+    set_money(tp, "ira_contributions",     prompt_money("  Traditional IRA contributions", tp.get("ira_contributions",0)))
+    set_money(tp, "hsa_contributions",     prompt_money("  HSA contributions", tp.get("hsa_contributions",0)))
+
+def edit_nj_property(tp: Dict):
+    print("\n-- Edit: NJ Rent / Property Tax --")
+    set_money(tp, "rent_paid",         prompt_money("  Rent paid (NJ)", tp.get("rent_paid",0)))
+    set_money(tp, "property_tax_paid", prompt_money("  Property tax paid (NJ)", tp.get("property_tax_paid",0)))
+    tp["months_at_property"] = prompt_int("  Months lived at property (0–12)", tp.get("months_at_property",0))
+    tp["landlord_or_owner"]  = prompt("  Landlord/Owner (optional)", tp.get("landlord_or_owner",""))
+
+def edit_refund_prefs(tp: Dict):
+    print("\n-- Edit: Refund / Payment Prefs --")
+    dd = prompt_yesno("Direct deposit if refund?", default_no=not tp.get("direct_deposit", False))
+    tp["direct_deposit"] = dd
+    if dd:
+        routing = prompt("  Routing number", tp.get("bank_routing",""))
+        account = prompt("  Account number", tp.get("bank_account",""))
+        tp["bank_routing"] = routing
+        tp["bank_routing_digits"] = digits_list(routing)
+        tp["bank_account"] = account
+        tp["bank_account_digits"] = digits_list(account)
+        tp["bank_account_type"] = prompt_choice("  Account type", ["checking","savings"], tp.get("bank_account_type","checking"))
+
+def show_summary(tp: Dict, w2s: List[Dict]):
+    # (kept same as above)
+    print("\n=========== REVIEW SUMMARY ===========")
+    print(f"Name: {tp.get('first','')} {tp.get('last','')}")
+    print(f"SSN:  {tp.get('ssn','')}")
+    print(f"DOB:  {tp.get('dob','')}")
+    print(f"Email: {tp.get('email','')}")
+    print(f"Filing status: {tp.get('filing_status','')}")
+    addr = tp.get("address", {})
+    print("Address:")
+    print(f"  {addr.get('line1','')}")
+    if addr.get("line2"): print(f"  {addr.get('line2')}")
+    print(f"  {addr.get('city','')}, {addr.get('state','')} {addr.get('zip','')}")
+    print(f"NJ full-year resident: {tp.get('nj_full_year_resident', False)}")
+    if tp.get("nj_county"): print(f"NJ County: {tp.get('nj_county')}")
+
+    print("\nDependents:")
+    deps = tp.get("dependents", [])
+    if not deps:
+        print("  (none)")
+    else:
+        for i, d in enumerate(deps, 1):
+            print(f"  {i}. {d.get('first','')} {d.get('last','')} — {d.get('relationship','')} (SSN {d.get('ssn','')})")
+
+    print("\nW-2s:")
+    if not w2s:
+        print("  (none)")
+    else:
+        for i, w in enumerate(w2s, 1):
+            print(f"  {i}. {w.get('employer','')}: "
+                  f"Wages {w.get('wages',0):,.2f}, Fed WH {w.get('federal_withheld',0):,.2f}, "
+                  f"NJ Wages {w.get('nj_wages',0):,.2f}, NJ WH {w.get('nj_withheld',0):,.2f}")
+
+    print("\nOther Income:")
+    print(f"  Interest(1099-INT): {tp.get('interest',0):,.2f}")
+    print(f"  Dividends(1099-DIV): {tp.get('dividends',0):,.2f}")
+    print(f"  Unemployment(1099-G): {tp.get('unemployment',0):,.2f}")
+    print(f"  NEC gross(1099-NEC): {tp.get('nec_income',0):,.2f}  Expenses: {tp.get('nec_expenses',0):,.2f}")
+    print(f"  Social Security(SSA-1099): {tp.get('ssa_benefits',0):,.2f}")
+    print(f"  Pension/IRA(1099-R): {tp.get('pension',0):,.2f}")
+
+    print("\nAdjustments & NJ:")
+    print(f"  Student loan interest: {tp.get('student_loan_interest',0):,.2f}")
+    print(f"  IRA contributions: {tp.get('ira_contributions',0):,.2f}")
+    print(f"  HSA contributions: {tp.get('hsa_contributions',0):,.2f}")
+    print(f"  Rent paid (NJ): {tp.get('rent_paid',0):,.2f}")
+    print(f"  Property tax paid (NJ): {tp.get('property_tax_paid',0):,.2f}")
+    print(f"  Months at property: {tp.get('months_at_property',0)}")
+    if tp.get("landlord_or_owner"): print(f"  Landlord/Owner: {tp.get('landlord_or_owner')}")
+
+    print("\nRefund/Deposit:")
+    if tp.get("direct_deposit", False):
+        print(f"  Direct deposit: YES ({tp.get('bank_account_type','checking')})")
+        print(f"  Routing: {tp.get('bank_routing','')}  Account: {tp.get('bank_account','')}")
+    else:
+        print("  Direct deposit: NO")
+    print("======================================\n")
+
+def review_and_edit(tp: Dict, w2s: List[Dict]):
+    while True:
+        show_summary(tp, w2s)
+        print("Edit menu:")
+        print("  1) Personal & address")
+        print("  2) Dependents")
+        print("  3) W-2s")
+        print("  4) Other income")
+        print("  5) Adjustments & deductions")
+        print("  6) NJ rent / property tax")
+        print("  7) Refund preferences")
+        print("  8) Continue to compute")
+        choice = prompt_int("Choose 1–8", 8)
+        if choice == 1:   edit_personal(tp)
+        elif choice == 2: deps = collect_dependents(); tp["dependents"] = deps
+        elif choice == 3: edit_w2s(w2s)
+        elif choice == 4: edit_other_income(tp)
+        elif choice == 5: edit_adjustments(tp)
+        elif choice == 6: edit_nj_property(tp)
+        elif choice == 7: edit_refund_prefs(tp)
+        elif choice == 8: return
+
+# ---------- engines + main ----------
+
+def load_engines():
+    use_stub_fed = os.getenv("USE_STUB_FED", "0") == "1"
+    use_stub_nj  = os.getenv("USE_STUB_NJ",  "0") == "1"
+    if use_stub_fed:
+        from engines.compute_federal import compute_federal as FED
+    else:
+        from engines.compute_federal_full import compute_federal as FED
+    if use_stub_nj:
+        from engines.compute_nj import compute_nj as NJ
+    else:
+        from engines.compute_nj_full import compute_nj as NJ
+    return FED, NJ
+
+def write_json(path: str, data: Dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
 def main():
-    print("US + NJ Tax Wizard —", datetime.now().date().isoformat())
-    print("(Educational tool — not official tax advice.)")
+    FED, NJ = load_engines()
 
-    taxpayer = gather_personal()
-    dependents = gather_dependents()
-    taxpayer["dependents_list"] = dependents
-    taxpayer["dependents"] = len(dependents)
+    taxpayer = collect_personal_info()
+    taxpayer["dependents"] = collect_dependents()
+    w2s = collect_w2s()
+    collect_other_income(taxpayer)
+    collect_adjustments(taxpayer)
+    collect_nj_property(taxpayer)
+    collect_refund_prefs(taxpayer)
 
-    w2s = gather_w2s()
-    other = gather_other_income()
-    adjustments = gather_adjustments()
-    nj_housing = gather_nj_housing()
-    bank = gather_refund_info()
+    # Review & edit before computing
+    review_and_edit(taxpayer, w2s)
 
-    # save a raw snapshot of all inputs (with digits arrays) for mapping later
-    session_blob = {
-        "taxpayer": taxpayer,
-        "dependents": dependents,
-        "w2s": w2s,
-        "other_income": other,
-        "adjustments": adjustments,
-        "nj_housing": nj_housing,
-        "bank": bank,
-    }
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    with (SESS_DIR / f"session_{stamp}.json").open("w", encoding="utf-8") as f:
-        json.dump(session_blob, f, indent=2)
+    fed_raw = FED(taxpayer, w2s)
+    nj_raw  = NJ(taxpayer, w2s)
 
-    # Merge relevant blocks into taxpayer for engines
-    tp_for_engine = dict(taxpayer)
-    tp_for_engine.update(other)
-    tp_for_engine.update(adjustments)
-    tp_for_engine["nj_housing"] = nj_housing
-    tp_for_engine["bank"] = bank
-
-    # compute
-    fed_raw = FED(tp_for_engine, w2s)
-    nj_raw  = NJ(tp_for_engine, w2s)
-
-    # add per-line digit arrays for mapping
-    fed_lines = add_digit_arrays_to_lines(fed_raw)
-    nj_lines  = add_digit_arrays_to_lines(nj_raw)
-
-    # write combined outputs
-    with (OUT_DIR / "out_f1040.json").open("w", encoding="utf-8") as f:
-        json.dump({"inputs": {"taxpayer": taxpayer, "w2s": w2s}, "lines": fed_lines}, f, indent=2)
-    with (OUT_DIR / "out_nj1040.json").open("w", encoding="utf-8") as f:
-        json.dump({"inputs": {"taxpayer": taxpayer, "w2s": w2s}, "lines": nj_lines}, f, indent=2)
-
-    # also write lighter CSVs for quick review
-    save_taxpayer_csv(taxpayer, dependents)
-    save_w2s_csv(w2s)
-
-    # console summaries
-    total_wages = sum(float(w.get("wages_box1", 0) or 0) for w in w2s)
-    fed_wh = sum(float(w.get("fed_withheld_box2", 0) or 0) for w in w2s)
-    nj_wh  = sum(float(w.get("nj_withheld_box17", 0) or 0) for w in w2s)
+    write_json("out/out_f1040.json", {"inputs": taxpayer, "w2s": w2s, "lines": fed_raw})
+    write_json("out/out_nj1040.json", {"inputs": taxpayer, "w2s": w2s, "lines": nj_raw})
 
     print("\n=== Federal Summary ===")
-    print(f"Wages: {total_wages:,.2f} | Withheld: {fed_wh:,.2f} | Refund: {fed_lines.get('34',0):,.2f} | Owed: {fed_lines.get('37',0):,.2f}")
-    print("Wrote", OUT_DIR / "out_f1040.json")
+    wages   = sum(w.get("wages",0) for w in w2s)
+    fed_tax = fed_raw.get("16", 0)
+    fed_wh  = sum(w.get("federal_withheld",0) for w in w2s)
+    print(f"Wages: {wages:,.2f} | Tax: {fed_tax:,.2f} | Withheld: {fed_wh:,.2f} | "
+          f"Refund: {fed_raw.get('34',0):,.2f} | Owed: {fed_raw.get('37',0):,.2f}")
+    print("Wrote out/out_f1040.json")
 
     print("\n=== NJ Summary ===")
-    print(f"Wages: {total_wages:,.2f} | Withheld: {nj_wh:,.2f} | Refund: {nj_lines.get('34',0):,.2f} | Owed: {nj_lines.get('37',0):,.2f}")
-    print("Wrote", OUT_DIR / "out_nj1040.json")
+    nj_wages = sum(w.get("nj_wages",0) for w in w2s)
+    nj_tax   = nj_raw.get("16", 0)
+    nj_wh    = sum(w.get("nj_withheld",0) for w in w2s)
+    print(f"Wages: {nj_wages:,.2f} | Tax: {nj_tax:,.2f} | Withheld: {nj_wh:,.2f} | "
+          f"Refund: {nj_raw.get('65',0):,.2f} | Owed: {nj_raw.get('66',0):,.2f}")
+    print("Wrote out/out_nj1040.json\n")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(1)
+
 
